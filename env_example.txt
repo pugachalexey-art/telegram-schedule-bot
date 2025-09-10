@@ -1,0 +1,6 @@
+
+# .env example (do not commit real secrets)
+BOT_TOKEN=PASTE_TELEGRAM_TOKEN_HERE
+GOOGLE_CREDENTIALS_JSON={"type":"service_account",...}  # Paste full JSON on one line
+SHEET_ID=1cUuac_9FxiE2Zubj6nvoKgWtKUCNbPHw
+SHEET_NAME=Schedule

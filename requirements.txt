@@ -1,0 +1,6 @@
+
+python-telegram-bot==21.6
+gspread
+google-auth
+pytz
+python-dateutil
