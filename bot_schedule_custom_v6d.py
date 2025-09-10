@@ -285,7 +285,7 @@ async def send_or_edit(update: Update, text: str, *, reply_markup=None):
         await update.message.reply_text(chunks[-1], reply_markup=reply_markup)
 
 # ---------- Date parsing ----------
-DATE_RE = re.compile(r"^\\s*(\\d{1,2})[.\\-/](\\d{1,2})[.\\-/](\\d{2,4})\\s*$")
+DATE_RE = re.compile(r"^\s*(\d{1,2})[.\-\/](\d{1,2})[.\-\/](\d{2,4})\s*$")
 def parse_user_date(text: str):
     t = (text or "").strip()
     m = DATE_RE.match(t)
