@@ -1,32 +1,29 @@
 # bot_schedule_web.py
-# Вебхук-енртрипоінт для Render.
-# Запускає webhook, якщо задано WEBHOOK_URL (інакше polling для локальних тестів).
-# ВАЖЛИВО: url_path має співпадати з кінцем WEBHOOK_URL; у PTB — БЕЗ початкового "/".
+# Вебхуки для Render. Працює навіть якщо у core немає notify_loop (не впаде).
 
 import os
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler
-from bot_schedule_custom_v6d import (
-    on_cb, on_error, cmd_start, cmd_today, cmd_tomorrow, cmd_week,
-    cmd_date, cmd_subject, cmd_next, cmd_help, notify_loop
-)
+import bot_schedule_custom_v6d as core  # імпортуємо модуль цілком
 
 def main():
     token = os.environ["BOT_TOKEN"]
     app = ApplicationBuilder().token(token).build()
 
-    app.add_handler(CommandHandler("start", cmd_start))
-    app.add_handler(CommandHandler("today", cmd_today))
-    app.add_handler(CommandHandler("tomorrow", cmd_tomorrow))
-    app.add_handler(CommandHandler("week", cmd_week))
-    app.add_handler(CommandHandler("date", cmd_date))
-    app.add_handler(CommandHandler("subject", cmd_subject))
-    app.add_handler(CommandHandler("next", cmd_next))
-    app.add_handler(CommandHandler("help", cmd_help))
-    app.add_handler(CallbackQueryHandler(on_cb))
-    app.add_error_handler(on_error)
+    # хендлери з core
+    app.add_handler(CommandHandler("start", core.cmd_start))
+    app.add_handler(CommandHandler("today", core.cmd_today))
+    app.add_handler(CommandHandler("tomorrow", core.cmd_tomorrow))
+    app.add_handler(CommandHandler("week", core.cmd_week))
+    app.add_handler(CommandHandler("date", core.cmd_date))
+    app.add_handler(CommandHandler("subject", core.cmd_subject))
+    app.add_handler(CommandHandler("next", core.cmd_next))
+    app.add_handler(CommandHandler("help", core.cmd_help))
+    app.add_handler(CallbackQueryHandler(core.on_cb))
+    app.add_error_handler(core.on_error)
 
-    # Нагадування
-    app.job_queue.run_repeating(notify_loop, interval=60, first=10)
+    # якщо в core є notify_loop — запускаємо повторювану джобу
+    if hasattr(core, "notify_loop"):
+        app.job_queue.run_repeating(core.notify_loop, interval=60, first=10)
 
     webhook_url = os.getenv("WEBHOOK_URL")  # напр. https://<app>.onrender.com/telegram
     listen_addr = os.getenv("LISTEN_ADDR", "0.0.0.0")
@@ -38,8 +35,8 @@ def main():
         app.run_webhook(
             listen=listen_addr,
             port=port,
-            url_path=url_path_clean,   # "telegram"
-            webhook_url=webhook_url,   # повний URL
+            url_path=url_path_clean,
+            webhook_url=webhook_url,
             drop_pending_updates=True,
             allowed_updates=None,
         )
