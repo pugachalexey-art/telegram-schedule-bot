@@ -10,7 +10,7 @@ from bot_schedule_custom_v6d import (
 )
 
 def main():
-    token = os.environ["BOT_TOKEN"]
+    token = os.environ["8209753781:AAFSPwKn0wChJW_YB-QYbPcM6V_S4wtfJHY"]
     app = ApplicationBuilder().token(token).build()
 
     app.add_handler(CommandHandler("start", cmd_start))
@@ -24,7 +24,7 @@ def main():
     app.add_handler(CallbackQueryHandler(on_cb))
     app.add_error_handler(on_error)
 
-    webhook_url = os.getenv("WEBHOOK_URL")  # напр. https://<твій-сервіс>.onrender.com/telegram
+    webhook_url = os.getenv("WEBHOOK_URL")  # напр. https://telegram-schedule-bot-81d0.onrender.com/telegram
     listen_addr = os.getenv("LISTEN_ADDR", "0.0.0.0")
     port = int(os.getenv("PORT", "8080"))
     webhook_path = os.getenv("WEBHOOK_PATH", "/telegram")
