@@ -10,7 +10,7 @@ from bot_schedule_custom_v6d import (
 )
 
 def main():
-    token = os.environ["8209753781:AAFSPwKn0wChJW_YB-QYbPcM6V_S4wtfJHY"]
+    token = os.environ["BOT_TOKEN"]
     app = ApplicationBuilder().token(token).build()
 
     app.add_handler(CommandHandler("start", cmd_start))
