@@ -1,19 +1,21 @@
 # bot_schedule_custom_v6d.py
-# v6d + notifications:
-# - Subject view shows only dates >= today (Europe/Kyiv). (from base v6d)
-# - Main menu: add "Увімкнути сповіщення" / "Вимкнути сповіщення".
-# - Persist subscriptions in JSON; send test notification within 3 minutes when enabling.
-# - Remind 10 хв до початку заняття (per Google Sheet date/time), using PTB JobQueue.
-# - Daily refresh of jobs at 00:10 Europe/Kyiv.
+# v6d (updated) — сповіщення + виправлення форматування:
+# - Кнопки: "Підключити сповіщення" / "Відключити сповіщення"
+# - Тест через 3 хв після підписки
+# - Нагадування за 10 хв до початку пари (job_queue кожні 60 сек)
+# - Підписки зберігаються у вкладці Google Sheets "Subscribers"
+# - Реальні переносі рядків \n (без екранування), fallback-номер пари без "№"
+# - Регулярка для /date виправлена
+# УВАГА: сервісній пошті потрібен доступ Editor до таблиці
 
 import os, json, gspread, logging, pytz, math, itertools, re, traceback, locale
-from datetime import datetime, timedelta, date, time as dtime
+from datetime import datetime, timedelta, date
 from dateutil.parser import parse as dtparse
 from google.oauth2.service_account import Credentials
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, CallbackQueryHandler,
-    ContextTypes, MessageHandler, filters
+    ContextTypes
 )
 from telegram.error import BadRequest, TelegramError
 
@@ -29,44 +31,6 @@ SHEET_NAME = os.getenv("SHEET_NAME", "Schedule")
 if not all([BOT_TOKEN, GOOGLE_CREDENTIALS_JSON, SHEET_ID]):
     raise RuntimeError("Set BOT_TOKEN, GOOGLE_CREDENTIALS_JSON, SHEET_ID env vars")
 
-# --- simple persistence for notification subscriptions & jobs ---
-SUBS_FILE = os.getenv("SUBS_FILE", "/mnt/data/subscriptions.json")
-def load_subs():
-    try:
-        with open(SUBS_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-            if not isinstance(data, dict): return {}
-            return data
-    except Exception:
-        return {}
-
-def save_subs(data: dict):
-    try:
-        Path(SUBS_FILE).parent.mkdir(parents=True, exist_ok=True)
-        with open(SUBS_FILE, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        logger.warning("Failed to save subs: %s", e)
-
-def set_subscribed(user_id: int, chat_id: int, flag: bool):
-    subs = load_subs()
-    key = str(user_id)
-    if flag:
-        subs[key] = {"chat_id": chat_id, "enabled": True, "ts": int(datetime.now().timestamp())}
-    else:
-        subs[key] = {"chat_id": chat_id, "enabled": False, "ts": int(datetime.now().timestamp())}
-    save_subs(subs)
-
-def is_subscribed(user_id: int) -> bool:
-    subs = load_subs()
-    state = subs.get(str(user_id))
-    return bool(state and state.get("enabled"))
-
-def get_chat_for_user(user_id: int) -> int | None:
-    subs = load_subs()
-    state = subs.get(str(user_id))
-    return int(state["chat_id"]) if state and "chat_id" in state else None
-
 UA_DAYNAMES = {0:"Понеділок",1:"Вівторок",2:"Середа",3:"Четвер",4:"Пʼятниця",5:"Субота",6:"Неділя"}
 UA_TO_EN = {"Понеділок":"Monday","Вівторок":"Tuesday","Середа":"Wednesday","Четвер":"Thursday","Пʼятниця":"Friday","Субота":"Saturday","Неділя":"Sunday"}
 
@@ -75,20 +39,88 @@ try:
 except Exception:
     pass
 
-# ---------- Google Sheets ----------
+# ---------- Google Sheets (READ/WRITE) ----------
 def make_gspread_client():
-    scopes = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
+    # Потрібен запис для вкладки Subscribers
+    scopes = ["https://www.googleapis.com/auth/spreadsheets"]
     info = json.loads(GOOGLE_CREDENTIALS_JSON)
     creds = Credentials.from_service_account_info(info, scopes=scopes)
     return gspread.authorize(creds)
 
-def get_records():
+def open_sheet():
     gc = make_gspread_client()
     sh = gc.open_by_key(SHEET_ID)
+    return sh
+
+def get_records():
+    sh = open_sheet()
     ws = sh.worksheet(SHEET_NAME)
     recs = ws.get_all_records()
     logging.info("Loaded %d rows. Columns: %s", len(recs), list(recs[0].keys()) if recs else [])
     return recs
+
+# --- Subscribers persistence ---
+SUBS_WS_NAME = "Subscribers"
+SUBS_HEADERS = ["chat_id", "enabled", "updated_at"]
+
+def ensure_subs_ws(sh):
+    try:
+        ws = sh.worksheet(SUBS_WS_NAME)
+    except gspread.WorksheetNotFound:
+        ws = sh.add_worksheet(title=SUBS_WS_NAME, rows=1000, cols=3)
+        ws.update([SUBS_HEADERS])
+    return ws
+
+def get_subscribers_set():
+    sh = open_sheet()
+    ws = ensure_subs_ws(sh)
+    values = ws.get_all_values()
+    if not values or len(values) < 2:
+        return set()
+    headers = values[0]
+    idx_chat = headers.index("chat_id") if "chat_id" in headers else 0
+    idx_enabled = headers.index("enabled") if "enabled" in headers else 1
+    subs = set()
+    for row in values[1:]:
+        try:
+            chat_id = int(row[idx_chat])
+            enabled = str(row[idx_enabled]).strip().lower() in ("1","true","yes","y","on","enable","enabled")
+            if enabled:
+                subs.add(chat_id)
+        except Exception:
+            continue
+    return subs
+
+def upsert_subscription(chat_id: int, enabled: bool):
+    sh = open_sheet()
+    ws = ensure_subs_ws(sh)
+    values = ws.get_all_values()
+    headers = values[0] if values else SUBS_HEADERS
+    if not values or headers != SUBS_HEADERS:
+        ws.clear()
+        ws.update([SUBS_HEADERS])
+        values = [SUBS_HEADERS]
+    idx = None
+    for i, row in enumerate(values[1:], start=2):
+        if str(row[0]).strip() == str(chat_id):
+            idx = i
+            break
+    now_str = datetime.now(KYIV_TZ).strftime("%Y-%m-%d %H:%M:%S")
+    if idx is None:
+        ws.append_row([str(chat_id), "TRUE" if enabled else "FALSE", now_str], value_input_option="USER_ENTERED")
+    else:
+        ws.update(f"A{idx}:C{idx}", [[str(chat_id), "TRUE" if enabled else "FALSE", now_str]])
+
+def is_subscribed(chat_id: int) -> bool:
+    sh = open_sheet()
+    ws = ensure_subs_ws(sh)
+    values = ws.get_all_values()
+    if not values or len(values) < 2:
+        return False
+    for row in values[1:]:
+        if row and str(row[0]).strip() == str(chat_id):
+            return str(row[1]).strip().lower() in ("1","true","yes","y","on","enable","enabled")
+    return False
 
 # ---------- Helpers ----------
 def normalize_date(val):
@@ -107,16 +139,6 @@ def hhmm(val):
         s = s.zfill(4); s = s[:2]+":"+s[2:]
     if len(s) >= 5 and s[2] == ":": return s[:5]
     return s
-
-def parse_time_to_dt(date_dt: datetime, tstr: str) -> datetime | None:
-    t = hhmm(tstr)
-    if not t or len(t) < 4: return None
-    try:
-        hh, mm = t.split(":")
-        naive = datetime(date_dt.year, date_dt.month, date_dt.day, int(hh), int(mm))
-        return KYIV_TZ.localize(naive)
-    except Exception:
-        return None
 
 def derive_weekday(dtobj):
     return UA_DAYNAMES.get(dtobj.weekday(), "") if dtobj else ""
@@ -147,6 +169,16 @@ def get_time_span(rec):
     if ts: return ts
     if te: return te
     return ""
+
+def parse_time_start(rec):
+    ts = hhmm(rec.get("time_start") or rec.get("Початок") or rec.get("Пара") or "")
+    if not ts:
+        return None
+    try:
+        hh, mm = ts.split(":")
+        return int(hh), int(mm)
+    except Exception:
+        return None
 
 def unique(values):
     seen=set(); out=[]
@@ -191,7 +223,8 @@ def filter_rows(rows, *, target_date=None, weekday_en=None, subject=None, from_d
     return out
 
 def fmt_line_core(rec, idx_for_fallback=None):
-    lesson=get_lesson(rec, fallback=(f"№{idx_for_fallback}" if idx_for_fallback else ""))
+    # fallback тепер просто "4", без "№"
+    lesson=get_lesson(rec, fallback=(str(idx_for_fallback) if idx_for_fallback else ""))
     span=get_time_span(rec)
     left = lesson
     if span: left = f"{lesson} ({span})" if lesson else f"({span})"
@@ -214,9 +247,9 @@ def group_by_date(rows):
 
 def fmt_today(rows_day, target_dt):
     header=f"{derive_weekday(target_dt)}, {target_dt.strftime('%d.%m.%Y')}"
-    if not rows_day: return header+"\\nНічого не знайдено."
+    if not rows_day: return header+"\nНічого не знайдено."
     lines=[header]+[fmt_line_core(r, idx_for_fallback=i) for i,r in enumerate(rows_day, start=1)]
-    return "\\n".join(lines)
+    return "\n".join(lines)
 
 def fmt_week(rows, monday_dt):
     days=[monday_dt + timedelta(days=i) for i in range(6)]
@@ -228,9 +261,9 @@ def fmt_week(rows, monday_dt):
     for d in days:
         header=f"{derive_weekday(d)}, {d.strftime('%d.%m.%Y')}"
         day_rows=sorted(rows_by_date[d], key=lambda rec: (get_lesson(rec, ""), hhmm(rec.get("time_start") or "")))
-        if not day_rows: blocks.append(header+"\\n—")
-        else: blocks.append("\\n".join([header]+[fmt_line_core(r, idx_for_fallback=i) for i,r in enumerate(day_rows, start=1)]))
-    return "\\n\\n".join(blocks)
+        if not day_rows: blocks.append(header+"\n—")
+        else: blocks.append("\n".join([header]+[fmt_line_core(r, idx_for_fallback=i) for i,r in enumerate(day_rows, start=1)]))
+    return "\n\n".join(blocks)
 
 def fmt_grouped_next(rows):
     if not rows: return "Нічого не знайдено."
@@ -238,21 +271,18 @@ def fmt_grouped_next(rows):
     for d, group in group_by_date(rows):
         header=f"{derive_weekday(d)}, {d.strftime('%d.%m.%Y')}"
         lines=[fmt_line_core(r, idx_for_fallback=i) for i,r in enumerate(group, start=1)]
-        pieces.append("\\n".join([header]+lines))
-    return "\\n\\n".join(pieces)
+        pieces.append("\n".join([header]+lines))
+    return "\n\n".join(pieces)
 
-def main_menu(notif_state: bool | None = None):
-    notif_row = [
-        InlineKeyboardButton("Увімкнути сповіщення", callback_data="m:notif_on"),
-        InlineKeyboardButton("Вимкнути сповіщення", callback_data="m:notif_off"),
-    ]
+def main_menu():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("Розклад на сьогодні", callback_data="m:today"),
          InlineKeyboardButton("Розклад на завтра", callback_data="m:tomorrow")],
         [InlineKeyboardButton("Розклад на тиждень", callback_data="m:week")],
         [InlineKeyboardButton("Розклад по предмету", callback_data="m:subject")],
         [InlineKeyboardButton("Найближчі пари", callback_data="m:next")],
-        notif_row,
+        [InlineKeyboardButton("Підключити сповіщення", callback_data="m:notify_on"),
+         InlineKeyboardButton("Відключити сповіщення", callback_data="m:notify_off")],
     ])
 
 # ---- Messaging helpers ----
@@ -260,10 +290,10 @@ MAX_CHUNK = 3500
 def split_text(text, max_len=MAX_CHUNK):
     parts=[]
     while len(text) > max_len:
-        cut = text.rfind("\\n", 0, max_len)
+        cut = text.rfind("\n", 0, max_len)
         if cut == -1: cut = max_len
         parts.append(text[:cut])
-        text = text[cut:].lstrip("\\n")
+        text = text[cut:].lstrip("\n")
     parts.append(text)
     return parts
 
@@ -300,100 +330,9 @@ def parse_user_date(text: str):
     except Exception:
         return None
 
-# ---------- Notification scheduling ----------
-def _format_reminder_line(rec):
-    # Build a concise line for the reminder
-    line = fmt_line_core(rec)  # already "№X (HH:MM–HH:MM) — Subject (Type), Teacher"
-    # Strip left side number for cleaner notif
-    return f"Нагадування: {line}"
-
-def _iter_future_lessons(rows, *, from_dt_kiev: datetime | None = None):
-    now = from_dt_kiev or datetime.now(KYIV_TZ)
-    today = datetime(now.year, now.month, now.day)
-    for r in rows:
-        d = normalize_date(r.get("date") or r.get("Дата"))
-        if not d: continue
-        # time_start is needed
-        ts = r.get("time_start") or r.get("Початок") or r.get("Пара")
-        start_dt = parse_time_to_dt(d, ts) if ts else None
-        if not start_dt: continue
-        if start_dt <= now: continue
-        yield r, start_dt
-
-async def _send_reminder(ctx: ContextTypes.DEFAULT_TYPE):
-    job = ctx.job
-    chat_id = job.data.get("chat_id")
-    text = job.data.get("text") or "Нагадування."
-    try:
-        await ctx.bot.send_message(chat_id, text)
-    except Exception as e:
-        logger.warning("Failed to send reminder to %s: %s", chat_id, e)
-
-def _cancel_user_jobs(app, user_id: int):
-    jobs = app.job_queue.get_jobs_by_name(f"user:{user_id}")
-    for j in jobs:
-        j.schedule_removal()
-
-def schedule_user_reminders(app, user_id: int, chat_id: int):
-    # Cancel previous
-    _cancel_user_jobs(app, user_id)
-    # Load schedule and enqueue jobs 10 minutes before
-    try:
-        rows = get_records()
-    except Exception as e:
-        logger.error("Cannot load records for scheduling: %s", e)
-        return 0
-    now = datetime.now(KYIV_TZ)
-    count = 0
-    for rec, start_dt in _iter_future_lessons(rows, from_dt_kiev=now):
-        remind_at = start_dt - timedelta(minutes=10)
-        if remind_at <= now:  # if already within 10 minutes, skip
-            continue
-        text = _format_reminder_line(rec)
-        app.job_queue.run_once(
-            _send_reminder,
-            when=remind_at,
-            data={"chat_id": chat_id, "text": text},
-            name=f"user:{user_id}",
-            chat_id=chat_id,
-            user_id=user_id,
-            timezone=KYIV_TZ,
-        )
-        count += 1
-    logger.info("Scheduled %d reminder jobs for user %s", count, user_id)
-    return count
-
-def schedule_test_notification(app, chat_id: int, user_id: int):
-    # Send test within 3 minutes; we pick 2 minutes
-    app.job_queue.run_once(
-        _send_reminder,
-        when=timedelta(minutes=2),
-        data={"chat_id": chat_id, "text": "Тест: сповіщення увімкнено. Це приклад нагадування."},
-        name=f"user:{user_id}",
-        chat_id=chat_id,
-        user_id=user_id,
-        timezone=KYIV_TZ,
-    )
-
-async def daily_refresh_all(ctx: ContextTypes.DEFAULT_TYPE):
-    # Re-schedule for all enabled users once a day
-    app = ctx.application
-    subs = load_subs()
-    n_users = 0
-    for key, st in subs.items():
-        if st.get("enabled"):
-            uid = int(key)
-            chat_id = int(st.get("chat_id"))
-            schedule_user_reminders(app, uid, chat_id)
-            n_users += 1
-    logger.info("Daily refresh scheduled reminders for %d users", n_users)
-
-# ---------- Handlers ----------
+# ---------- Core Handlers ----------
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
-    enabled = is_subscribed(uid)
-    state_txt = "увімкнені ✅" if enabled else "вимкнені ⛔️"
-    await update.message.reply_text(f"Обери дію. Зараз сповіщення {state_txt}.", reply_markup=main_menu())
+    await update.message.reply_text("Обери дію:", reply_markup=main_menu())
 
 async def on_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -413,13 +352,13 @@ async def on_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await handle_subject_menu(update, ctx, page=0)
         elif data == "m:next":
             await handle_next(update, ctx)
-        elif data == "m:notif_on":
-            await handle_notif_on(update, ctx)
-        elif data == "m:notif_off":
-            await handle_notif_off(update, ctx)
+        elif data == "m:notify_on":
+            await handle_notify_on(update, ctx)
+        elif data == "m:notify_off":
+            await handle_notify_off(update, ctx)
         elif data.startswith("subj:"):
             _, page_str, token = data.split(":", 2)
-            if token == "__page__":
+            if token == "__page__":  # пагінація
                 page = int(page_str)
                 return await handle_subject_menu(update, ctx, page=page)
             try:
@@ -439,28 +378,6 @@ async def on_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await q.edit_message_text("Сталася помилка при обробці запиту. Спробуй ще раз із меню /start.")
         except Exception:
             pass
-
-async def handle_notif_on(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
-    chat_id = update.effective_chat.id
-    if is_subscribed(uid):
-        return await send_or_edit(update, "Сповіщення вже увімкнені. Якщо потрібно, можеш їх вимкнути.", reply_markup=main_menu())
-    set_subscribed(uid, chat_id, True)
-    # schedule for user
-    jobs = schedule_user_reminders(ctx.application, uid, chat_id)
-    # schedule test
-    schedule_test_notification(ctx.application, chat_id, uid)
-    note = "Сповіщення підключені, протягом 3 хв ви отримаєте тестове повідомлення."
-    await send_or_edit(update, f"{note}\\nЗаплановано нагадувань: {jobs}", reply_markup=main_menu())
-
-async def handle_notif_off(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
-    chat_id = update.effective_chat.id
-    if not is_subscribed(uid):
-        return await send_or_edit(update, "Сповіщення вже вимкнені.", reply_markup=main_menu())
-    set_subscribed(uid, chat_id, False)
-    _cancel_user_jobs(ctx.application, uid)
-    await send_or_edit(update, "Сповіщення вимкнені. Більше нагадувань не надходитиме.", reply_markup=main_menu())
 
 async def handle_today(update: Update, ctx: ContextTypes.DEFAULT_TYPE, delta_days: int):
     rows = get_records()
@@ -508,12 +425,11 @@ async def handle_subject_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE, pa
 
 async def show_subject(update: Update, ctx: ContextTypes.DEFAULT_TYPE, subject_name: str):
     rows = get_records()
-    # filter from today (Kyiv)
     now = datetime.now(KYIV_TZ)
     today = datetime(now.year, now.month, now.day)
     res = filter_rows(rows, subject=subject_name, from_dt=today)
     body = fmt_grouped_next(res) if res else "Нічого не знайдено."
-    txt = f"Розклад по предмету: {subject_name}\\n\\n{body}"
+    txt = f"Розклад по предмету: {subject_name}\n\n{body}"
     await send_or_edit(update, txt, reply_markup=main_menu())
 
 async def handle_next(update: Update, ctx: ContextTypes.DEFAULT_TYPE, limit:int=10):
@@ -527,18 +443,110 @@ async def handle_next(update: Update, ctx: ContextTypes.DEFAULT_TYPE, limit:int=
 
 async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "/start — меню\\n"
-        "/today — розклад на сьогодні\\n"
-        "/tomorrow — розклад на завтра\\n"
-        "/week — розклад на тиждень\\n"
-        "/date DD.MM.YYYY — розклад на дату\\n"
-        "/subject Назва — розклад по предмету (без аргументу відкриє список)\\n"
-        "/next — найближчі пари\\n"
-        "/notify_on — увімкнути сповіщення\\n"
-        "/notify_off — вимкнути сповіщення\\n"
+        "/start — меню\n"
+        "/today — розклад на сьогодні\n"
+        "/tomorrow — розклад на завтра\n"
+        "/week — розклад на тиждень\n"
+        "/date DD.MM.YYYY — розклад на дату\n"
+        "/subject Назва — розклад по предмету (без аргументу відкриє список)\n"
+        "/next — найближчі пари\n"
+        "/notify_on — підключити сповіщення\n"
+        "/notify_off — відключити сповіщення\n"
         "/debug — діагностика таблиці"
     )
 
+# --- Subscription handlers ---
+async def handle_notify_on(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    if is_subscribed(chat_id):
+        return await send_or_edit(update, "Сповіщення вже підключені ✅", reply_markup=main_menu())
+    try:
+        upsert_subscription(chat_id, True)
+    except Exception as e:
+        logging.exception("Subscribe failed: %s", e)
+        return await send_or_edit(
+            update,
+            "Не зміг записати підписку в Google Sheets. Перевір доступ Editor для сервісної пошти і змінну GOOGLE_CREDENTIALS_JSON.",
+            reply_markup=main_menu(),
+        )
+    await send_or_edit(update, "Сповіщення підключені ✅\nПротягом 3 хв ви отримаєте тестове повідомлення.", reply_markup=main_menu())
+    ctx.job_queue.run_once(send_test_notification, when=180, data={"chat_id": chat_id})
+
+async def handle_notify_off(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    if not is_subscribed(chat_id):
+        return await send_or_edit(update, "Сповіщення вже відключені ❎", reply_markup=main_menu())
+    try:
+        upsert_subscription(chat_id, False)
+    except Exception as e:
+        logging.exception("Unsubscribe failed: %s", e)
+        return await send_or_edit(
+            update,
+            "Не зміг оновити підписку в Google Sheets. Перевір доступ Editor для сервісної пошти.",
+            reply_markup=main_menu(),
+        )
+    await send_or_edit(update, "Сповіщення відключені ❎", reply_markup=main_menu())
+
+async def send_test_notification(ctx: ContextTypes.DEFAULT_TYPE):
+    chat_id = ctx.job.data.get("chat_id")
+    try:
+        await ctx.bot.send_message(chat_id, "🔔 Тестове сповіщення: все працює ✅")
+    except Exception as e:
+        logging.warning("Failed to send test notification: %s", e)
+
+# --- Notification loop ---
+_notified_keys = set()
+_notified_day = None
+
+async def notify_loop(ctx: ContextTypes.DEFAULT_TYPE):
+    global _notified_day, _notified_keys
+    try:
+        now = datetime.now(KYIV_TZ)
+        today = datetime(now.year, now.month, now.day)
+        if _notified_day != today.date():
+            _notified_day = today.date()
+            _notified_keys = set()
+        subs = get_subscribers_set()
+        if not subs:
+            return
+        rows = get_records()
+        # Сьогоднішні пари з коректним часом початку
+        todays = [r for r in rows if (d:=normalize_date(r.get("date") or r.get("Дата"))) == today and parse_time_start(r)]
+        for r in todays:
+            hhmm_pair = parse_time_start(r)
+            if not hhmm_pair:
+                continue
+            hh, mm = hhmm_pair
+            start_dt = KYIV_TZ.localize(datetime(today.year, today.month, today.day, hh, mm))
+            delta = (start_dt - now).total_seconds()
+            # 0..600 сек до старту (10 хв)
+            if 0 <= delta <= 600:
+                key = (today.date().isoformat(), get_lesson(r,""), get_subject(r), hh, mm)
+                if key in _notified_keys:
+                    continue
+                _notified_keys.add(key)
+                msg = build_reminder_message(r, start_dt)
+                for chat_id in subs:
+                    try:
+                        await ctx.bot.send_message(chat_id, msg)
+                    except Exception as e:
+                        logging.warning("Notify fail to %s: %s", chat_id, e)
+    except Exception as e:
+        logging.exception("notify_loop error: %s", e)
+
+def build_reminder_message(rec, start_dt):
+    span = get_time_span(rec)
+    lesson = get_lesson(rec, "")
+    subj = get_subject(rec)
+    typ = get_type(rec)
+    teacher = get_teacher(rec)
+    left = lesson
+    if span: left = f"{lesson} ({span})" if lesson else f"({span})"
+    right_core = ", ".join([p for p in [f"{subj} ({typ})" if subj and typ else subj, teacher] if p])
+    tstr = start_dt.strftime("%H:%M")
+    return f"🔔 Нагадування: о {tstr} починається\n{left} — {right_core}"
+
+# --- Command wrappers for external entry ---
 async def cmd_today(update: Update, ctx: ContextTypes.DEFAULT_TYPE): await handle_today(update, ctx, 0)
 async def cmd_tomorrow(update: Update, ctx: ContextTypes.DEFAULT_TYPE): await handle_today(update, ctx, 1)
 async def cmd_week(update: Update, ctx: ContextTypes.DEFAULT_TYPE): await handle_week(update, ctx)
@@ -559,48 +567,38 @@ async def cmd_subject(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     today = datetime(now.year, now.month, now.day)
     res = filter_rows(rows, subject=name, from_dt=today)
     body = fmt_grouped_next(res) if res else "Нічого не знайдено."
-    await send_or_edit(update, f"Розклад по предмету: {name}\\n\\n{body}", reply_markup=main_menu())
+    await send_or_edit(update, f"Розклад по предмету: {name}\n\n{body}", reply_markup=main_menu())
 async def cmd_next(update: Update, ctx: ContextTypes.DEFAULT_TYPE): await handle_next(update, ctx)
-
-async def cmd_notify_on(update: Update, ctx: ContextTypes.DEFAULT_TYPE): 
-    # convenience command
-    await handle_notif_on(update, ctx)
-
-async def cmd_notify_off(update: Update, ctx: ContextTypes.DEFAULT_TYPE): 
-    await handle_notif_off(update, ctx)
-
 async def cmd_debug(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     try:
         rows = get_records()
         cols = list(rows[0].keys()) if rows else []
-        subs = infer_subjects(rows)[:15]
+        subs = list(get_subscribers_set())
         now = datetime.now(KYIV_TZ)
         today = datetime(now.year, now.month, now.day)
         today_rows = filter_rows(rows, target_date=today)
         text = (
-            f"Колонок: {len(cols)}\\n"
-            f"Назви колонок: {cols}\\n"
-            f"Рядків у таблиці: {len(rows)}\\n"
-            f"Перші предмети (відсортовані): {subs}\\n"
-            f"Сьогодні знайдено рядків: {len(today_rows)}"
+            f"Колонок: {len(cols)}\nНазви колонок: {cols}\n"
+            f"Рядків у таблиці: {len(rows)}\nСьогодні: {len(today_rows)} рядків\n"
+            f"Підписників: {len(subs)}"
         )
     except Exception as e:
-        text = f"DEBUG ERROR: {e}\\n{traceback.format_exc()}"
+        text = f"DEBUG ERROR: {e}\n{traceback.format_exc()}"
     await update.message.reply_text(text)
 
+# --- Error handler ---
 async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE):
     err = context.error
-    logging.error("Global error: %s\\n%s", err, traceback.format_exc())
+    logging.error("Global error: %s\n%s", err, traceback.format_exc())
     try:
         if isinstance(update, Update) and update.effective_chat:
             await context.bot.send_message(update.effective_chat.id, f"Сталася тимчасова помилка ({err.__class__.__name__}). Спробуй ще раз.")
     except Exception:
         pass
 
+# --- Local entry (optional) ---
 def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
-
-    # Register handlers
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("today", cmd_today))
     app.add_handler(CommandHandler("tomorrow", cmd_tomorrow))
@@ -608,32 +606,30 @@ def main():
     app.add_handler(CommandHandler("date", cmd_date))
     app.add_handler(CommandHandler("subject", cmd_subject))
     app.add_handler(CommandHandler("next", cmd_next))
-    app.add_handler(CommandHandler("notify_on", cmd_notify_on))
-    app.add_handler(CommandHandler("notify_off", cmd_notify_off))
     app.add_handler(CommandHandler("help", cmd_help))
-    app.add_handler(CommandHandler("debug", cmd_debug))
+    app.add_handler(CommandHandler("notify_on", handle_notify_on))
+    app.add_handler(CommandHandler("notify_off", handle_notify_off))
     app.add_handler(CallbackQueryHandler(on_cb))
     app.add_error_handler(on_error)
-
-    # Daily refresh at 00:10 Kyiv time
-    app.job_queue.run_daily(
-        daily_refresh_all,
-        time=dtime(hour=0, minute=10, second=0, tzinfo=KYIV_TZ),
-        name="daily_refresh_all",
-        timezone=KYIV_TZ,
-    )
-
-    # Restore jobs for existing subscribers on start
-    subs = load_subs()
-    for key, st in subs.items():
-        if st.get("enabled"):
-            uid = int(key)
-            chat_id = int(st.get("chat_id"))
-            schedule_user_reminders(app, uid, chat_id)
-
-    # Runner selection is done in wrapper script (polling/webhook)
-    # Here we just return app for reuse if needed
-    app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
+    # Нагадування раз на хвилину
+    app.job_queue.run_repeating(notify_loop, interval=60, first=10)
+    # Старт: webhook якщо WEBHOOK_URL задано, інакше polling
+    webhook_url = os.getenv("WEBHOOK_URL")
+    listen_addr = os.getenv("LISTEN_ADDR", "0.0.0.0")
+    port = int(os.getenv("PORT", "8080"))
+    webhook_path = os.getenv("WEBHOOK_PATH", "/telegram")
+    if webhook_url:
+        url_path_clean = webhook_path[1:] if webhook_path.startswith("/") else webhook_path
+        app.run_webhook(
+            listen=listen_addr,
+            port=port,
+            url_path=url_path_clean,
+            webhook_url=webhook_url,
+            drop_pending_updates=True,
+            allowed_updates=None,
+        )
+    else:
+        app.run_polling(allowed_updates=None, drop_pending_updates=True)
 
 if __name__ == "__main__":
     main()
