@@ -2,10 +2,12 @@
 # v6d (updated) — сповіщення + виправлення форматування:
 # - Кнопки: "Підключити сповіщення" / "Відключити сповіщення"
 # - Тест через 3 хв після підписки
-# - Нагадування за 10 хв до початку пари (job_queue кожні 60 сек)
+# - Нагадування за 10 хв до початку пари (JobQueue кожні 60 сек)
 # - Підписки зберігаються у вкладці Google Sheets "Subscribers"
-# - Реальні переносі рядків \n (без екранування), fallback-номер пари без "№"
+# - Реальні переносі рядків \n (без подвійного екранування)
+# - Fallback-номер пари без "№"
 # - Регулярка для /date виправлена
+# - Уникнення "Message is not modified" при edit_message_text
 # УВАГА: сервісній пошті потрібен доступ Editor до таблиці
 
 import os, json, gspread, logging, pytz, math, itertools, re, traceback, locale
@@ -259,7 +261,7 @@ def fmt_week(rows, monday_dt):
         d=normalize_date(r.get("date") or r.get("Дата"))
         if d in rows_by_date: rows_by_date[d].append(r)
     for d in days:
-        header=f"{derive_weekday(d)}, {d.strftime('%d.%m.%Y')}"
+        header=f"{derive_weekday(d)}, {d.strftime('%d.%м.%Y')}" if False else f"{derive_weekday(d)}, {d.strftime('%d.%m.%Y')}"
         day_rows=sorted(rows_by_date[d], key=lambda rec: (get_lesson(rec, ""), hhmm(rec.get("time_start") or "")))
         if not day_rows: blocks.append(header+"\n—")
         else: blocks.append("\n".join([header]+[fmt_line_core(r, idx_for_fallback=i) for i,r in enumerate(day_rows, start=1)]))
@@ -299,20 +301,39 @@ def split_text(text, max_len=MAX_CHUNK):
 
 async def send_or_edit(update: Update, text: str, *, reply_markup=None):
     chunks = split_text(text)
+
     if update.callback_query:
+        msg = update.callback_query.message
+        # Не редагуємо, якщо текст не змінився (уникаємо "Message is not modified")
+        if msg and (msg.text or msg.caption):
+            current = msg.text or msg.caption
+            if current == chunks[0]:
+                for chunk in chunks[1:]:
+                    await update.effective_chat.send_message(chunk)
+                if reply_markup is not None:
+                    try:
+                        await update.effective_chat.send_message(" ", reply_markup=reply_markup)
+                    except TelegramError:
+                        pass
+                return
         try:
-            await update.callback_query.edit_message_text(chunks[0], reply_markup=reply_markup if len(chunks)==1 else None)
+            await update.callback_query.edit_message_text(
+                chunks[0],
+                reply_markup=reply_markup if len(chunks) == 1 else None
+            )
         except TelegramError as e:
             logging.warning("Edit failed, fallback to send: %s", e)
             await update.effective_chat.send_message(chunks[0])
+
         for chunk in chunks[1:-1]:
             await update.effective_chat.send_message(chunk)
         if len(chunks) > 1:
             await update.effective_chat.send_message(chunks[-1], reply_markup=reply_markup)
-    else:
-        for chunk in chunks[:-1]:
-            await update.message.reply_text(chunk)
-        await update.message.reply_text(chunks[-1], reply_markup=reply_markup)
+        return
+
+    for chunk in chunks[:-1]:
+        await update.message.reply_text(chunk)
+    await update.message.reply_text(chunks[-1], reply_markup=reply_markup)
 
 # ---------- Date parsing ----------
 DATE_RE = re.compile(r"^\s*(\d{1,2})[.\-\/](\d{1,2})[.\-\/](\d{2,4})\s*$")
@@ -358,7 +379,7 @@ async def on_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await handle_notify_off(update, ctx)
         elif data.startswith("subj:"):
             _, page_str, token = data.split(":", 2)
-            if token == "__page__":  # пагінація
+            if token == "__page__":
                 page = int(page_str)
                 return await handle_subject_menu(update, ctx, page=page)
             try:
@@ -470,12 +491,12 @@ async def handle_notify_on(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             reply_markup=main_menu(),
         )
     await send_or_edit(update, "Сповіщення підключені ✅\nПротягом 3 хв ви отримаєте тестове повідомлення.", reply_markup=main_menu())
-    ctx.job_queue.run_once(send_test_notification, when=180, data={"chat_id": chat_id})
+    ctx.job_queue.run_once(send_test_notification, when=timedelta(minutes=3), data={"chat_id": chat_id})
 
 async def handle_notify_off(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     if not is_subscribed(chat_id):
-        return await send_or_edit(update, "Сповіщення вже відключені ❎", reply_markup=main_menu())
+        return await send_or_edit(update, "Сповіщення вже відключені 🔴", reply_markup=main_menu())
     try:
         upsert_subscription(chat_id, False)
     except Exception as e:
@@ -485,7 +506,7 @@ async def handle_notify_off(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             "Не зміг оновити підписку в Google Sheets. Перевір доступ Editor для сервісної пошти.",
             reply_markup=main_menu(),
         )
-    await send_or_edit(update, "Сповіщення відключені ❎", reply_markup=main_menu())
+    await send_or_edit(update, "Сповіщення відключені 🔴", reply_markup=main_menu())
 
 async def send_test_notification(ctx: ContextTypes.DEFAULT_TYPE):
     chat_id = ctx.job.data.get("chat_id")
@@ -598,7 +619,12 @@ async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE):
 
 # --- Local entry (optional) ---
 def main():
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    app = (
+        ApplicationBuilder()
+        .token(BOT_TOKEN)
+        .connect_timeout(30).read_timeout(30).write_timeout(30).pool_timeout(30)
+        .build()
+    )
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("today", cmd_today))
     app.add_handler(CommandHandler("tomorrow", cmd_tomorrow))
@@ -612,7 +638,8 @@ def main():
     app.add_handler(CallbackQueryHandler(on_cb))
     app.add_error_handler(on_error)
     # Нагадування раз на хвилину
-    app.job_queue.run_repeating(notify_loop, interval=60, first=10)
+    if getattr(app, "job_queue", None):
+        app.job_queue.run_repeating(notify_loop, interval=60, first=10)
     # Старт: webhook якщо WEBHOOK_URL задано, інакше polling
     webhook_url = os.getenv("WEBHOOK_URL")
     listen_addr = os.getenv("LISTEN_ADDR", "0.0.0.0")
@@ -633,3 +660,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

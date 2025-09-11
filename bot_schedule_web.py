@@ -1,5 +1,5 @@
 # bot_schedule_web.py
-# Вебхуки для Render. Працює навіть якщо у core немає notify_loop (не впаде).
+# Вебхуки для Render. Терпимо відсутність job_queue, але для нагадувань треба екстра залежність.
 
 import os
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler
@@ -7,9 +7,13 @@ import bot_schedule_custom_v6d as core  # імпортуємо модуль ці
 
 def main():
     token = os.environ["BOT_TOKEN"]
-    app = ApplicationBuilder().token(token).build()
+    app = (
+        ApplicationBuilder()
+        .token(token)
+        .connect_timeout(30).read_timeout(30).write_timeout(30).pool_timeout(30)
+        .build()
+    )
 
-    # хендлери з core
     app.add_handler(CommandHandler("start", core.cmd_start))
     app.add_handler(CommandHandler("today", core.cmd_today))
     app.add_handler(CommandHandler("tomorrow", core.cmd_tomorrow))
@@ -21,8 +25,8 @@ def main():
     app.add_handler(CallbackQueryHandler(core.on_cb))
     app.add_error_handler(core.on_error)
 
-    # якщо в core є notify_loop — запускаємо повторювану джобу
-    if hasattr(core, "notify_loop"):
+    # Нагадування (якщо доступний JobQueue і є notify_loop)
+    if hasattr(core, "notify_loop") and getattr(app, "job_queue", None):
         app.job_queue.run_repeating(core.notify_loop, interval=60, first=10)
 
     webhook_url = os.getenv("WEBHOOK_URL")  # напр. https://<app>.onrender.com/telegram
