@@ -1,7 +1,7 @@
-
+﻿
 # bot_schedule_custom_v6d.py
 # v6d change:
-# - In subject view (menu & /subject Назва) show only dates >= today (Europe/Kyiv).
+# - In subject view (menu & /subject РќР°Р·РІР°) show only dates >= today (Europe/Kyiv).
 # - Header unchanged; data grouped by date as before.
 #
 # Base: v6c (DD.MM.YYYY parsing, lesson+time, message splitting, sorted subjects, banned subjects, etc.)
@@ -29,8 +29,8 @@ SHEET_NAME = os.getenv("SHEET_NAME", "Schedule")
 if not all([BOT_TOKEN, GOOGLE_CREDENTIALS_JSON, SHEET_ID]):
     raise RuntimeError("Set BOT_TOKEN, GOOGLE_CREDENTIALS_JSON, SHEET_ID env vars")
 
-UA_DAYNAMES = {0:"Понеділок",1:"Вівторок",2:"Середа",3:"Четвер",4:"Пʼятниця",5:"Субота",6:"Неділя"}
-UA_TO_EN = {"Понеділок":"Monday","Вівторок":"Tuesday","Середа":"Wednesday","Четвер":"Thursday","Пʼятниця":"Friday","Субота":"Saturday","Неділя":"Sunday"}
+UA_DAYNAMES = {0:"РџРѕРЅРµРґС–Р»РѕРє",1:"Р’С–РІС‚РѕСЂРѕРє",2:"РЎРµСЂРµРґР°",3:"Р§РµС‚РІРµСЂ",4:"РџКјСЏС‚РЅРёС†СЏ",5:"РЎСѓР±РѕС‚Р°",6:"РќРµРґС–Р»СЏ"}
+UA_TO_EN = {"РџРѕРЅРµРґС–Р»РѕРє":"Monday","Р’С–РІС‚РѕСЂРѕРє":"Tuesday","РЎРµСЂРµРґР°":"Wednesday","Р§РµС‚РІРµСЂ":"Thursday","РџКјСЏС‚РЅРёС†СЏ":"Friday","РЎСѓР±РѕС‚Р°":"Saturday","РќРµРґС–Р»СЏ":"Sunday"}
 
 try:
     locale.setlocale(locale.LC_COLLATE, "uk_UA.UTF-8")
@@ -74,28 +74,28 @@ def derive_weekday(dtobj):
     return UA_DAYNAMES.get(dtobj.weekday(), "") if dtobj else ""
 
 def get_type(rec):
-    return (rec.get("type") or rec.get("Тип") or rec.get("notes") or rec.get("Примітки") or "").strip()
+    return (rec.get("type") or rec.get("РўРёРї") or rec.get("notes") or rec.get("РџСЂРёРјС–С‚РєРё") or "").strip()
 
 def get_subject(rec):
-    for key in ["subject","Subject","Предмет","назва","Назва","discipline","Дисципліна"]:
+    for key in ["subject","Subject","РџСЂРµРґРјРµС‚","РЅР°Р·РІР°","РќР°Р·РІР°","discipline","Р”РёСЃС†РёРїР»С–РЅР°"]:
         v = rec.get(key)
         if v: return str(v).strip()
     return ""
 
 def get_teacher(rec):
-    for key in ["teacher","Teacher","Викладач","Преподаватель"]:
+    for key in ["teacher","Teacher","Р’РёРєР»Р°РґР°С‡","РџСЂРµРїРѕРґР°РІР°С‚РµР»СЊ"]:
         v = rec.get(key)
         if v: return str(v).strip()
     return ""
 
 def get_lesson(rec, fallback=None):
-    v = (rec.get("lesson") or rec.get("Lesson") or rec.get("№") or rec.get("Номер") or rec.get("Пара №") or fallback or "")
+    v = (rec.get("lesson") or rec.get("Lesson") or rec.get("в„–") or rec.get("РќРѕРјРµСЂ") or rec.get("РџР°СЂР° в„–") or fallback or "")
     return str(v).strip()
 
 def get_time_span(rec):
-    ts = hhmm(rec.get("time_start") or rec.get("Початок") or rec.get("Пара") or "")
-    te = hhmm(rec.get("time_end")   or rec.get("Кінець")   or "")
-    if ts and te: return f"{ts}–{te}"
+    ts = hhmm(rec.get("time_start") or rec.get("РџРѕС‡Р°С‚РѕРє") or rec.get("РџР°СЂР°") or "")
+    te = hhmm(rec.get("time_end")   or rec.get("РљС–РЅРµС†СЊ")   or "")
+    if ts and te: return f"{ts}вЂ“{te}"
     if ts: return ts
     if te: return te
     return ""
@@ -109,7 +109,7 @@ def unique(values):
 
 def norm(s): return str(s or "").strip().casefold()
 
-BANNED_SUBJECTS = {norm("вихідний"), norm("науковий день")}
+BANNED_SUBJECTS = {norm("РІРёС…С–РґРЅРёР№"), norm("РЅР°СѓРєРѕРІРёР№ РґРµРЅСЊ")}
 
 def infer_subjects(rows):
     subs = unique([get_subject(r) for r in rows])
@@ -125,8 +125,8 @@ def filter_rows(rows, *, target_date=None, weekday_en=None, subject=None, from_d
     norm_subject = norm(subject) if subject else None
     for r in rows:
         r_subject=get_subject(r)
-        r_date=normalize_date(r.get("date") or r.get("Дата"))
-        r_weekday=(r.get("weekday") or r.get("День") or "").strip()
+        r_date=normalize_date(r.get("date") or r.get("Р”Р°С‚Р°"))
+        r_weekday=(r.get("weekday") or r.get("Р”РµРЅСЊ") or "").strip()
         r_weekday_en=UA_TO_EN.get(r_weekday, r_weekday)
         ok=True
         if norm_subject and r_subject and norm(r_subject) != norm_subject: ok=False
@@ -135,15 +135,15 @@ def filter_rows(rows, *, target_date=None, weekday_en=None, subject=None, from_d
         if from_dt and r_date and r_date<from_dt: ok=False
         if ok: out.append(r)
     def sort_key(rec):
-        d=normalize_date(rec.get("date") or rec.get("Дата"))
-        ts=hhmm(rec.get("time_start") or rec.get("Початок") or rec.get("Пара"))
+        d=normalize_date(rec.get("date") or rec.get("Р”Р°С‚Р°"))
+        ts=hhmm(rec.get("time_start") or rec.get("РџРѕС‡Р°С‚РѕРє") or rec.get("РџР°СЂР°"))
         lesson=get_lesson(rec, "")
         return (d or datetime.min, lesson or (ts or "00:00"))
     out.sort(key=sort_key)
     return out
 
 def fmt_line_core(rec, idx_for_fallback=None):
-    lesson=get_lesson(rec, fallback=(f"№{idx_for_fallback}" if idx_for_fallback else ""))
+    lesson=get_lesson(rec, fallback=(f"в„–{idx_for_fallback}" if idx_for_fallback else ""))
     span=get_time_span(rec)
     left = lesson
     if span: left = f"{lesson} ({span})" if lesson else f"({span})"
@@ -152,21 +152,21 @@ def fmt_line_core(rec, idx_for_fallback=None):
     teacher=get_teacher(rec)
     subj_typ = (f"{subj} ({typ})" if subj and typ else (subj or (f"({typ})" if typ else "")))
     right = ", ".join([p for p in [subj_typ, teacher] if p])
-    if left and right: return f"{left} — {right}"
+    if left and right: return f"{left} вЂ” {right}"
     return left or right or ""
 
 def group_by_date(rows):
     items=[]
     for r in rows:
-        d=normalize_date(r.get("date") or r.get("Дата"))
+        d=normalize_date(r.get("date") or r.get("Р”Р°С‚Р°"))
         if d: items.append((d,r))
-    items.sort(key=lambda x: (x[0], hhmm(x[1].get("time_start") or x[1].get("Початок") or "")))
+    items.sort(key=lambda x: (x[0], hhmm(x[1].get("time_start") or x[1].get("РџРѕС‡Р°С‚РѕРє") or "")))
     for d, group in itertools.groupby(items, key=lambda x: x[0]):
         yield d, [g[1] for g in group]
 
 def fmt_today(rows_day, target_dt):
     header=f"{derive_weekday(target_dt)}, {target_dt.strftime('%d.%m.%Y')}"
-    if not rows_day: return header+"\nНічого не знайдено."
+    if not rows_day: return header+"\nРќС–С‡РѕРіРѕ РЅРµ Р·РЅР°Р№РґРµРЅРѕ."
     lines=[header]+[fmt_line_core(r, idx_for_fallback=i) for i,r in enumerate(rows_day, start=1)]
     return "\n".join(lines)
 
@@ -175,17 +175,17 @@ def fmt_week(rows, monday_dt):
     blocks=[]
     rows_by_date={d:[] for d in days}
     for r in rows:
-        d=normalize_date(r.get("date") or r.get("Дата"))
+        d=normalize_date(r.get("date") or r.get("Р”Р°С‚Р°"))
         if d in rows_by_date: rows_by_date[d].append(r)
     for d in days:
         header=f"{derive_weekday(d)}, {d.strftime('%d.%m.%Y')}"
         day_rows=sorted(rows_by_date[d], key=lambda rec: (get_lesson(rec, ""), hhmm(rec.get("time_start") or "")))
-        if not day_rows: blocks.append(header+"\n—")
+        if not day_rows: blocks.append(header+"\nвЂ”")
         else: blocks.append("\n".join([header]+[fmt_line_core(r, idx_for_fallback=i) for i,r in enumerate(day_rows, start=1)]))
     return "\n\n".join(blocks)
 
 def fmt_grouped_next(rows):
-    if not rows: return "Нічого не знайдено."
+    if not rows: return "РќС–С‡РѕРіРѕ РЅРµ Р·РЅР°Р№РґРµРЅРѕ."
     pieces=[]
     for d, group in group_by_date(rows):
         header=f"{derive_weekday(d)}, {d.strftime('%d.%m.%Y')}"
@@ -195,11 +195,11 @@ def fmt_grouped_next(rows):
 
 def main_menu():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("Розклад на сьогодні", callback_data="m:today"),
-         InlineKeyboardButton("Розклад на завтра", callback_data="m:tomorrow")],
-        [InlineKeyboardButton("Розклад на тиждень", callback_data="m:week")],
-        [InlineKeyboardButton("Розклад по предмету", callback_data="m:subject")],
-        [InlineKeyboardButton("Найближчі пари", callback_data="m:next")],
+        [InlineKeyboardButton("Р РѕР·РєР»Р°Рґ РЅР° СЃСЊРѕРіРѕРґРЅС–", callback_data="m:today"),
+         InlineKeyboardButton("Р РѕР·РєР»Р°Рґ РЅР° Р·Р°РІС‚СЂР°", callback_data="m:tomorrow")],
+        [InlineKeyboardButton("Р РѕР·РєР»Р°Рґ РЅР° С‚РёР¶РґРµРЅСЊ", callback_data="m:week")],
+        [InlineKeyboardButton("Р РѕР·РєР»Р°Рґ РїРѕ РїСЂРµРґРјРµС‚Сѓ", callback_data="m:subject")],
+        [InlineKeyboardButton("РќР°Р№Р±Р»РёР¶С‡С– РїР°СЂРё", callback_data="m:next")],
     ])
 
 # ---- Messaging helpers ----
@@ -249,7 +249,7 @@ def parse_user_date(text: str):
 
 # ---------- Handlers ----------
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Обери дію:", reply_markup=main_menu())
+    await update.message.reply_text("РћР±РµСЂРё РґС–СЋ:", reply_markup=main_menu())
 
 async def on_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -277,18 +277,18 @@ async def on_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             try:
                 idx = int(token)
             except ValueError:
-                return await update.effective_chat.send_message("Помилка вибору предмета. Спробуй ще раз.")
+                return await update.effective_chat.send_message("РџРѕРјРёР»РєР° РІРёР±РѕСЂСѓ РїСЂРµРґРјРµС‚Р°. РЎРїСЂРѕР±СѓР№ С‰Рµ СЂР°Р·.")
             key = f"subjects_page_{page_str}"
             page_list = ctx.user_data.get(key) or []
             if 0 <= idx < len(page_list):
                 name = page_list[idx]
                 await show_subject(update, ctx, name)
             else:
-                await update.effective_chat.send_message("Предмет не знайдено. Спробуй ще раз.")
+                await update.effective_chat.send_message("РџСЂРµРґРјРµС‚ РЅРµ Р·РЅР°Р№РґРµРЅРѕ. РЎРїСЂРѕР±СѓР№ С‰Рµ СЂР°Р·.")
     except Exception as e:
         logging.exception("Callback error: %s", e)
         try:
-            await q.edit_message_text("Сталася помилка при обробці запиту. Спробуй ще раз із меню /start.")
+            await q.edit_message_text("РЎС‚Р°Р»Р°СЃСЏ РїРѕРјРёР»РєР° РїСЂРё РѕР±СЂРѕР±С†С– Р·Р°РїРёС‚Сѓ. РЎРїСЂРѕР±СѓР№ С‰Рµ СЂР°Р· С–Р· РјРµРЅСЋ /start.")
         except Exception:
             pass
 
@@ -306,7 +306,7 @@ async def handle_week(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     monday = now - timedelta(days=now.weekday())
     start = datetime(monday.year, monday.month, monday.day)
     end = start + timedelta(days=6)
-    rows_week = [r for r in rows if (d:=normalize_date(r.get("date") or r.get("Дата"))) and start <= d < end]
+    rows_week = [r for r in rows if (d:=normalize_date(r.get("date") or r.get("Р”Р°С‚Р°"))) and start <= d < end]
     txt = fmt_week(rows_week, start)
     await send_or_edit(update, txt, reply_markup=main_menu())
 
@@ -314,7 +314,7 @@ async def handle_subject_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE, pa
     rows = get_records()
     subjects = infer_subjects(rows)
     if not subjects:
-        return await send_or_edit(update, "У таблиці немає предметів.", reply_markup=main_menu())
+        return await send_or_edit(update, "РЈ С‚Р°Р±Р»РёС†С– РЅРµРјР°С” РїСЂРµРґРјРµС‚С–РІ.", reply_markup=main_menu())
     per_page = 8
     pages = max(1, math.ceil(len(subjects)/per_page))
     page = max(0, min(page, pages-1))
@@ -323,11 +323,11 @@ async def handle_subject_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE, pa
     ctx.user_data[f"subjects_page_{page}"] = page_subjects
     kb = [[InlineKeyboardButton(s, callback_data=f"subj:{page}:{i}")] for i, s in enumerate(page_subjects)]
     nav = []
-    if page>0: nav.append(InlineKeyboardButton("« Назад", callback_data=f"subj:{page-1}:__page__"))
-    if page<pages-1: nav.append(InlineKeyboardButton("Далі »", callback_data=f"subj:{page+1}:__page__"))
+    if page>0: nav.append(InlineKeyboardButton("В« РќР°Р·Р°Рґ", callback_data=f"subj:{page-1}:__page__"))
+    if page<pages-1: nav.append(InlineKeyboardButton("Р”Р°Р»С– В»", callback_data=f"subj:{page+1}:__page__"))
     if nav: kb.append(nav)
-    kb.append([InlineKeyboardButton("Меню", callback_data="m:today")])
-    text = f"Оберіть предмет (стор. {page+1}/{pages})"
+    kb.append([InlineKeyboardButton("РњРµРЅСЋ", callback_data="m:today")])
+    text = f"РћР±РµСЂС–С‚СЊ РїСЂРµРґРјРµС‚ (СЃС‚РѕСЂ. {page+1}/{pages})"
     if update.callback_query:
         try:
             await update.callback_query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(kb))
@@ -342,8 +342,8 @@ async def show_subject(update: Update, ctx: ContextTypes.DEFAULT_TYPE, subject_n
     now = datetime.now(KYIV_TZ)
     today = datetime(now.year, now.month, now.day)
     res = filter_rows(rows, subject=subject_name, from_dt=today)
-    body = fmt_grouped_next(res) if res else "Нічого не знайдено."
-    txt = f"Розклад по предмету: {subject_name}\n\n{body}"
+    body = fmt_grouped_next(res) if res else "РќС–С‡РѕРіРѕ РЅРµ Р·РЅР°Р№РґРµРЅРѕ."
+    txt = f"Р РѕР·РєР»Р°Рґ РїРѕ РїСЂРµРґРјРµС‚Сѓ: {subject_name}\n\n{body}"
     await send_or_edit(update, txt, reply_markup=main_menu())
 
 async def handle_next(update: Update, ctx: ContextTypes.DEFAULT_TYPE, limit:int=10):
@@ -357,14 +357,14 @@ async def handle_next(update: Update, ctx: ContextTypes.DEFAULT_TYPE, limit:int=
 
 async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "/start — меню\n"
-        "/today — розклад на сьогодні\n"
-        "/tomorrow — розклад на завтра\n"
-        "/week — розклад на тиждень\n"
-        "/date DD.MM.YYYY — розклад на дату\n"
-        "/subject Назва — розклад по предмету (без аргументу відкриє список)\n"
-        "/next — найближчі пари\n"
-        "/debug — діагностика таблиці"
+        "/start вЂ” РјРµРЅСЋ\n"
+        "/today вЂ” СЂРѕР·РєР»Р°Рґ РЅР° СЃСЊРѕРіРѕРґРЅС–\n"
+        "/tomorrow вЂ” СЂРѕР·РєР»Р°Рґ РЅР° Р·Р°РІС‚СЂР°\n"
+        "/week вЂ” СЂРѕР·РєР»Р°Рґ РЅР° С‚РёР¶РґРµРЅСЊ\n"
+        "/date DD.MM.YYYY вЂ” СЂРѕР·РєР»Р°Рґ РЅР° РґР°С‚Сѓ\n"
+        "/subject РќР°Р·РІР° вЂ” СЂРѕР·РєР»Р°Рґ РїРѕ РїСЂРµРґРјРµС‚Сѓ (Р±РµР· Р°СЂРіСѓРјРµРЅС‚Сѓ РІС–РґРєСЂРёС” СЃРїРёСЃРѕРє)\n"
+        "/next вЂ” РЅР°Р№Р±Р»РёР¶С‡С– РїР°СЂРё\n"
+        "/debug вЂ” РґС–Р°РіРЅРѕСЃС‚РёРєР° С‚Р°Р±Р»РёС†С–"
     )
 
 async def cmd_today(update: Update, ctx: ContextTypes.DEFAULT_TYPE): await handle_today(update, ctx, 0)
@@ -372,10 +372,10 @@ async def cmd_tomorrow(update: Update, ctx: ContextTypes.DEFAULT_TYPE): await ha
 async def cmd_week(update: Update, ctx: ContextTypes.DEFAULT_TYPE): await handle_week(update, ctx)
 async def cmd_date(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     arg = update.message.text.partition(" ")[2].strip()
-    if not arg: return await update.message.reply_text("Формат: /date DD.MM.YYYY (або YYYY-MM-DD)")
+    if not arg: return await update.message.reply_text("Р¤РѕСЂРјР°С‚: /date DD.MM.YYYY (Р°Р±Рѕ YYYY-MM-DD)")
     target = parse_user_date(arg)
     if not target:
-        return await update.message.reply_text("Не розпізнав дату. Приклад: /date 25.09.2025")
+        return await update.message.reply_text("РќРµ СЂРѕР·РїС–Р·РЅР°РІ РґР°С‚Сѓ. РџСЂРёРєР»Р°Рґ: /date 25.09.2025")
     rows = get_records()
     rows_day = filter_rows(rows, target_date=target)
     await send_or_edit(update, fmt_today(rows_day, target), reply_markup=main_menu())
@@ -386,8 +386,8 @@ async def cmd_subject(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     now = datetime.now(KYIV_TZ)
     today = datetime(now.year, now.month, now.day)
     res = filter_rows(rows, subject=name, from_dt=today)
-    body = fmt_grouped_next(res) if res else "Нічого не знайдено."
-    await send_or_edit(update, f"Розклад по предмету: {name}\n\n{body}", reply_markup=main_menu())
+    body = fmt_grouped_next(res) if res else "РќС–С‡РѕРіРѕ РЅРµ Р·РЅР°Р№РґРµРЅРѕ."
+    await send_or_edit(update, f"Р РѕР·РєР»Р°Рґ РїРѕ РїСЂРµРґРјРµС‚Сѓ: {name}\n\n{body}", reply_markup=main_menu())
 async def cmd_next(update: Update, ctx: ContextTypes.DEFAULT_TYPE): await handle_next(update, ctx)
 
 async def cmd_debug(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -399,11 +399,11 @@ async def cmd_debug(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         today = datetime(now.year, now.month, now.day)
         today_rows = filter_rows(rows, target_date=today)
         text = (
-            f"Колонок: {len(cols)}\n"
-            f"Назви колонок: {cols}\n"
-            f"Рядків у таблиці: {len(rows)}\n"
-            f"Перші предмети (відсортовані): {subs}\n"
-            f"Сьогодні знайдено рядків: {len(today_rows)}"
+            f"РљРѕР»РѕРЅРѕРє: {len(cols)}\n"
+            f"РќР°Р·РІРё РєРѕР»РѕРЅРѕРє: {cols}\n"
+            f"Р СЏРґРєС–РІ Сѓ С‚Р°Р±Р»РёС†С–: {len(rows)}\n"
+            f"РџРµСЂС€С– РїСЂРµРґРјРµС‚Рё (РІС–РґСЃРѕСЂС‚РѕРІР°РЅС–): {subs}\n"
+            f"РЎСЊРѕРіРѕРґРЅС– Р·РЅР°Р№РґРµРЅРѕ СЂСЏРґРєС–РІ: {len(today_rows)}"
         )
     except Exception as e:
         text = f"DEBUG ERROR: {e}\n{traceback.format_exc()}"
@@ -414,7 +414,7 @@ async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE):
     logging.error("Global error: %s\n%s", err, traceback.format_exc())
     try:
         if isinstance(update, Update) and update.effective_chat:
-            await context.bot.send_message(update.effective_chat.id, f"Сталася тимчасова помилка ({err.__class__.__name__}). Спробуй ще раз.")
+            await context.bot.send_message(update.effective_chat.id, f"РЎС‚Р°Р»Р°СЃСЏ С‚РёРјС‡Р°СЃРѕРІР° РїРѕРјРёР»РєР° ({err.__class__.__name__}). РЎРїСЂРѕР±СѓР№ С‰Рµ СЂР°Р·.")
     except Exception:
         pass
 

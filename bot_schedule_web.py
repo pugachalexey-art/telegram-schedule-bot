@@ -1,6 +1,6 @@
-# bot_schedule_web.py (robust import)
-# Імпортуємо модуль цілком і дістаємо хендлери через getattr,
-# щоб уникнути ImportError, якщо якась функція відсутня.
+﻿# bot_schedule_web.py (robust import)
+# Р†РјРїРѕСЂС‚СѓС”РјРѕ РјРѕРґСѓР»СЊ С†С–Р»РєРѕРј С– РґС–СЃС‚Р°С”РјРѕ С…РµРЅРґР»РµСЂРё С‡РµСЂРµР· getattr,
+# С‰РѕР± СѓРЅРёРєРЅСѓС‚Рё ImportError, СЏРєС‰Рѕ СЏРєР°СЃСЊ С„СѓРЅРєС†С–СЏ РІС–РґСЃСѓС‚РЅСЏ.
 
 import os
 import bot_schedule_custom_v6d as core
@@ -13,13 +13,13 @@ def main():
     token = os.environ["BOT_TOKEN"]
     app = ApplicationBuilder().token(token).build()
 
-    # Команди (усі через getattr)
+    # РљРѕРјР°РЅРґРё (СѓСЃС– С‡РµСЂРµР· getattr)
     app.add_handler(CommandHandler("start",   _get("cmd_start")))
     app.add_handler(CommandHandler("today",   _get("cmd_today")))
     app.add_handler(CommandHandler("tomorrow",_get("cmd_tomorrow")))
     app.add_handler(CommandHandler("week",    _get("cmd_week")))
 
-    # /weeknext: якщо немає cmd_weeknext, загортаємо handle_week_next
+    # /weeknext: СЏРєС‰Рѕ РЅРµРјР°С” cmd_weeknext, Р·Р°РіРѕСЂС‚Р°С”РјРѕ handle_week_next
     cmd_weeknext = _get("cmd_weeknext")
     if cmd_weeknext is None and _get("handle_week_next"):
         async def _cmd_weeknext(update, ctx):
