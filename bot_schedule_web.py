@@ -1,5 +1,5 @@
-# bot_schedule_web.py (clean minimal)
-# Реєструє тільки потрібні команди (+ callback) для вебхука/поллінгу.
+﻿# bot_schedule_web.py (clean minimal)
+# Р РµС”СЃС‚СЂСѓС” С‚С–Р»СЊРєРё РїРѕС‚СЂС–Р±РЅС– РєРѕРјР°РЅРґРё (+ callback) РґР»СЏ РІРµР±С…СѓРєР°/РїРѕР»Р»С–РЅРіСѓ.
 
 import os
 from bot_schedule_custom_v6d import (
