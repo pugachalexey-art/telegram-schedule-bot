@@ -1,46 +1,42 @@
 # bot_schedule_web.py
-# Вебхуки для Render. Терпимо відсутність job_queue, але для нагадувань треба екстра залежність.
+# Entrypoint: якщо є WEBHOOK_URL — запускає webhook, інакше polling.
+# ВАЖЛИВО: url_path має збігатися з кінцем WEBHOOK_URL.
 
 import os
-from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler
-import bot_schedule_custom_v6d as core  # імпортуємо модуль цілком
+from bot_schedule_custom_v6d import (
+    ApplicationBuilder, CommandHandler, CallbackQueryHandler,
+    on_cb, on_error, cmd_start, cmd_today, cmd_tomorrow, cmd_week,
+    cmd_date, cmd_subject, cmd_next, cmd_help
+)
 
 def main():
     token = os.environ["BOT_TOKEN"]
-    app = (
-        ApplicationBuilder()
-        .token(token)
-        .connect_timeout(30).read_timeout(30).write_timeout(30).pool_timeout(30)
-        .build()
-    )
+    app = ApplicationBuilder().token(token).build()
 
-    app.add_handler(CommandHandler("start", core.cmd_start))
-    app.add_handler(CommandHandler("today", core.cmd_today))
-    app.add_handler(CommandHandler("tomorrow", core.cmd_tomorrow))
-    app.add_handler(CommandHandler("week", core.cmd_week))
-    app.add_handler(CommandHandler("date", core.cmd_date))
-    app.add_handler(CommandHandler("subject", core.cmd_subject))
-    app.add_handler(CommandHandler("next", core.cmd_next))
-    app.add_handler(CommandHandler("help", core.cmd_help))
-    app.add_handler(CallbackQueryHandler(core.on_cb))
-    app.add_error_handler(core.on_error)
+    app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(CommandHandler("today", cmd_today))
+    app.add_handler(CommandHandler("tomorrow", cmd_tomorrow))
+    app.add_handler(CommandHandler("week", cmd_week))
+    app.add_handler(CommandHandler("date", cmd_date))
+    app.add_handler(CommandHandler("subject", cmd_subject))
+    app.add_handler(CommandHandler("next", cmd_next))
+    app.add_handler(CommandHandler("help", cmd_help))
+    app.add_handler(CallbackQueryHandler(on_cb))
+    app.add_error_handler(on_error)
 
-    # Нагадування (якщо доступний JobQueue і є notify_loop)
-    if hasattr(core, "notify_loop") and getattr(app, "job_queue", None):
-        app.job_queue.run_repeating(core.notify_loop, interval=60, first=10)
-
-    webhook_url = os.getenv("WEBHOOK_URL")  # напр. https://<app>.onrender.com/telegram
+    webhook_url = os.getenv("WEBHOOK_URL")  # напр. https://telegram-schedule-bot-81d0.onrender.com/telegram
     listen_addr = os.getenv("LISTEN_ADDR", "0.0.0.0")
     port = int(os.getenv("PORT", "8080"))
     webhook_path = os.getenv("WEBHOOK_PATH", "/telegram")
 
     if webhook_url:
-        url_path_clean = webhook_path[1:] if webhook_path.startswith("/") else webhook_path
+        # ВАЖЛИВО: Telegram звертається до WEBHOOK_URL, а сервер слухає url_path.
+        # Вони мають збігатися по шляху (наприклад, обидва закінчуються на /telegram).
         app.run_webhook(
             listen=listen_addr,
             port=port,
-            url_path=url_path_clean,
-            webhook_url=webhook_url,
+            url_path=webhook_path,    # <- додано
+            webhook_url=webhook_url,  # має містити той самий шлях
             drop_pending_updates=True,
             allowed_updates=None,
         )

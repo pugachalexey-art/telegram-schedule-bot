@@ -1,14 +1,10 @@
+
 # bot_schedule_custom_v6d.py
-# v6d (updated) — сповіщення + виправлення форматування:
-# - Кнопки: "Підключити сповіщення" / "Відключити сповіщення"
-# - Тест через 3 хв після підписки
-# - Нагадування за 10 хв до початку пари (JobQueue кожні 60 сек)
-# - Підписки зберігаються у вкладці Google Sheets "Subscribers"
-# - Реальні переносі рядків \n (без подвійного екранування)
-# - Fallback-номер пари без "№"
-# - Регулярка для /date виправлена
-# - Уникнення "Message is not modified" при edit_message_text
-# УВАГА: сервісній пошті потрібен доступ Editor до таблиці
+# v6d change:
+# - In subject view (menu & /subject Назва) show only dates >= today (Europe/Kyiv).
+# - Header unchanged; data grouped by date as before.
+#
+# Base: v6c (DD.MM.YYYY parsing, lesson+time, message splitting, sorted subjects, banned subjects, etc.)
 
 import os, json, gspread, logging, pytz, math, itertools, re, traceback, locale
 from datetime import datetime, timedelta, date
@@ -17,7 +13,7 @@ from google.oauth2.service_account import Credentials
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, CallbackQueryHandler,
-    ContextTypes
+    ContextTypes, MessageHandler, filters
 )
 from telegram.error import BadRequest, TelegramError
 
@@ -41,88 +37,20 @@ try:
 except Exception:
     pass
 
-# ---------- Google Sheets (READ/WRITE) ----------
+# ---------- Google Sheets ----------
 def make_gspread_client():
-    # Потрібен запис для вкладки Subscribers
-    scopes = ["https://www.googleapis.com/auth/spreadsheets"]
+    scopes = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
     info = json.loads(GOOGLE_CREDENTIALS_JSON)
     creds = Credentials.from_service_account_info(info, scopes=scopes)
     return gspread.authorize(creds)
 
-def open_sheet():
+def get_records():
     gc = make_gspread_client()
     sh = gc.open_by_key(SHEET_ID)
-    return sh
-
-def get_records():
-    sh = open_sheet()
     ws = sh.worksheet(SHEET_NAME)
     recs = ws.get_all_records()
     logging.info("Loaded %d rows. Columns: %s", len(recs), list(recs[0].keys()) if recs else [])
     return recs
-
-# --- Subscribers persistence ---
-SUBS_WS_NAME = "Subscribers"
-SUBS_HEADERS = ["chat_id", "enabled", "updated_at"]
-
-def ensure_subs_ws(sh):
-    try:
-        ws = sh.worksheet(SUBS_WS_NAME)
-    except gspread.WorksheetNotFound:
-        ws = sh.add_worksheet(title=SUBS_WS_NAME, rows=1000, cols=3)
-        ws.update([SUBS_HEADERS])
-    return ws
-
-def get_subscribers_set():
-    sh = open_sheet()
-    ws = ensure_subs_ws(sh)
-    values = ws.get_all_values()
-    if not values or len(values) < 2:
-        return set()
-    headers = values[0]
-    idx_chat = headers.index("chat_id") if "chat_id" in headers else 0
-    idx_enabled = headers.index("enabled") if "enabled" in headers else 1
-    subs = set()
-    for row in values[1:]:
-        try:
-            chat_id = int(row[idx_chat])
-            enabled = str(row[idx_enabled]).strip().lower() in ("1","true","yes","y","on","enable","enabled")
-            if enabled:
-                subs.add(chat_id)
-        except Exception:
-            continue
-    return subs
-
-def upsert_subscription(chat_id: int, enabled: bool):
-    sh = open_sheet()
-    ws = ensure_subs_ws(sh)
-    values = ws.get_all_values()
-    headers = values[0] if values else SUBS_HEADERS
-    if not values or headers != SUBS_HEADERS:
-        ws.clear()
-        ws.update([SUBS_HEADERS])
-        values = [SUBS_HEADERS]
-    idx = None
-    for i, row in enumerate(values[1:], start=2):
-        if str(row[0]).strip() == str(chat_id):
-            idx = i
-            break
-    now_str = datetime.now(KYIV_TZ).strftime("%Y-%m-%d %H:%M:%S")
-    if idx is None:
-        ws.append_row([str(chat_id), "TRUE" if enabled else "FALSE", now_str], value_input_option="USER_ENTERED")
-    else:
-        ws.update(f"A{idx}:C{idx}", [[str(chat_id), "TRUE" if enabled else "FALSE", now_str]])
-
-def is_subscribed(chat_id: int) -> bool:
-    sh = open_sheet()
-    ws = ensure_subs_ws(sh)
-    values = ws.get_all_values()
-    if not values or len(values) < 2:
-        return False
-    for row in values[1:]:
-        if row and str(row[0]).strip() == str(chat_id):
-            return str(row[1]).strip().lower() in ("1","true","yes","y","on","enable","enabled")
-    return False
 
 # ---------- Helpers ----------
 def normalize_date(val):
@@ -172,16 +100,6 @@ def get_time_span(rec):
     if te: return te
     return ""
 
-def parse_time_start(rec):
-    ts = hhmm(rec.get("time_start") or rec.get("Початок") or rec.get("Пара") or "")
-    if not ts:
-        return None
-    try:
-        hh, mm = ts.split(":")
-        return int(hh), int(mm)
-    except Exception:
-        return None
-
 def unique(values):
     seen=set(); out=[]
     for v in values:
@@ -225,8 +143,7 @@ def filter_rows(rows, *, target_date=None, weekday_en=None, subject=None, from_d
     return out
 
 def fmt_line_core(rec, idx_for_fallback=None):
-    # fallback тепер просто "4", без "№"
-    lesson=get_lesson(rec, fallback=(str(idx_for_fallback) if idx_for_fallback else ""))
+    lesson=get_lesson(rec, fallback=(f"№{idx_for_fallback}" if idx_for_fallback else ""))
     span=get_time_span(rec)
     left = lesson
     if span: left = f"{lesson} ({span})" if lesson else f"({span})"
@@ -261,7 +178,7 @@ def fmt_week(rows, monday_dt):
         d=normalize_date(r.get("date") or r.get("Дата"))
         if d in rows_by_date: rows_by_date[d].append(r)
     for d in days:
-        header=f"{derive_weekday(d)}, {d.strftime('%d.%м.%Y')}" if False else f"{derive_weekday(d)}, {d.strftime('%d.%m.%Y')}"
+        header=f"{derive_weekday(d)}, {d.strftime('%d.%m.%Y')}"
         day_rows=sorted(rows_by_date[d], key=lambda rec: (get_lesson(rec, ""), hhmm(rec.get("time_start") or "")))
         if not day_rows: blocks.append(header+"\n—")
         else: blocks.append("\n".join([header]+[fmt_line_core(r, idx_for_fallback=i) for i,r in enumerate(day_rows, start=1)]))
@@ -283,8 +200,6 @@ def main_menu():
         [InlineKeyboardButton("Розклад на тиждень", callback_data="m:week")],
         [InlineKeyboardButton("Розклад по предмету", callback_data="m:subject")],
         [InlineKeyboardButton("Найближчі пари", callback_data="m:next")],
-        [InlineKeyboardButton("Підключити сповіщення", callback_data="m:notify_on"),
-         InlineKeyboardButton("Відключити сповіщення", callback_data="m:notify_off")],
     ])
 
 # ---- Messaging helpers ----
@@ -301,42 +216,23 @@ def split_text(text, max_len=MAX_CHUNK):
 
 async def send_or_edit(update: Update, text: str, *, reply_markup=None):
     chunks = split_text(text)
-
     if update.callback_query:
-        msg = update.callback_query.message
-        # Не редагуємо, якщо текст не змінився (уникаємо "Message is not modified")
-        if msg and (msg.text or msg.caption):
-            current = msg.text or msg.caption
-            if current == chunks[0]:
-                for chunk in chunks[1:]:
-                    await update.effective_chat.send_message(chunk)
-                if reply_markup is not None:
-                    try:
-                        await update.effective_chat.send_message(" ", reply_markup=reply_markup)
-                    except TelegramError:
-                        pass
-                return
         try:
-            await update.callback_query.edit_message_text(
-                chunks[0],
-                reply_markup=reply_markup if len(chunks) == 1 else None
-            )
+            await update.callback_query.edit_message_text(chunks[0], reply_markup=reply_markup if len(chunks)==1 else None)
         except TelegramError as e:
             logging.warning("Edit failed, fallback to send: %s", e)
             await update.effective_chat.send_message(chunks[0])
-
         for chunk in chunks[1:-1]:
             await update.effective_chat.send_message(chunk)
         if len(chunks) > 1:
             await update.effective_chat.send_message(chunks[-1], reply_markup=reply_markup)
-        return
-
-    for chunk in chunks[:-1]:
-        await update.message.reply_text(chunk)
-    await update.message.reply_text(chunks[-1], reply_markup=reply_markup)
+    else:
+        for chunk in chunks[:-1]:
+            await update.message.reply_text(chunk)
+        await update.message.reply_text(chunks[-1], reply_markup=reply_markup)
 
 # ---------- Date parsing ----------
-DATE_RE = re.compile(r"^\s*(\d{1,2})[.\-\/](\d{1,2})[.\-\/](\d{2,4})\s*$")
+DATE_RE = re.compile(r"^\s*(\d{1,2})[.\-/](\d{1,2})[.\-/](\d{2,4})\s*$")
 def parse_user_date(text: str):
     t = (text or "").strip()
     m = DATE_RE.match(t)
@@ -351,7 +247,7 @@ def parse_user_date(text: str):
     except Exception:
         return None
 
-# ---------- Core Handlers ----------
+# ---------- Handlers ----------
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Обери дію:", reply_markup=main_menu())
 
@@ -373,10 +269,6 @@ async def on_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await handle_subject_menu(update, ctx, page=0)
         elif data == "m:next":
             await handle_next(update, ctx)
-        elif data == "m:notify_on":
-            await handle_notify_on(update, ctx)
-        elif data == "m:notify_off":
-            await handle_notify_off(update, ctx)
         elif data.startswith("subj:"):
             _, page_str, token = data.split(":", 2)
             if token == "__page__":
@@ -446,6 +338,7 @@ async def handle_subject_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE, pa
 
 async def show_subject(update: Update, ctx: ContextTypes.DEFAULT_TYPE, subject_name: str):
     rows = get_records()
+    # filter from today (Kyiv)
     now = datetime.now(KYIV_TZ)
     today = datetime(now.year, now.month, now.day)
     res = filter_rows(rows, subject=subject_name, from_dt=today)
@@ -471,103 +364,9 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "/date DD.MM.YYYY — розклад на дату\n"
         "/subject Назва — розклад по предмету (без аргументу відкриє список)\n"
         "/next — найближчі пари\n"
-        "/notify_on — підключити сповіщення\n"
-        "/notify_off — відключити сповіщення\n"
         "/debug — діагностика таблиці"
     )
 
-# --- Subscription handlers ---
-async def handle_notify_on(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    if is_subscribed(chat_id):
-        return await send_or_edit(update, "Сповіщення вже підключені ✅", reply_markup=main_menu())
-    try:
-        upsert_subscription(chat_id, True)
-    except Exception as e:
-        logging.exception("Subscribe failed: %s", e)
-        return await send_or_edit(
-            update,
-            "Не зміг записати підписку в Google Sheets. Перевір доступ Editor для сервісної пошти і змінну GOOGLE_CREDENTIALS_JSON.",
-            reply_markup=main_menu(),
-        )
-    await send_or_edit(update, "Сповіщення підключені ✅\nПротягом 3 хв ви отримаєте тестове повідомлення.", reply_markup=main_menu())
-    ctx.job_queue.run_once(send_test_notification, when=timedelta(minutes=3), data={"chat_id": chat_id})
-
-async def handle_notify_off(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    if not is_subscribed(chat_id):
-        return await send_or_edit(update, "Сповіщення вже відключені 🔴", reply_markup=main_menu())
-    try:
-        upsert_subscription(chat_id, False)
-    except Exception as e:
-        logging.exception("Unsubscribe failed: %s", e)
-        return await send_or_edit(
-            update,
-            "Не зміг оновити підписку в Google Sheets. Перевір доступ Editor для сервісної пошти.",
-            reply_markup=main_menu(),
-        )
-    await send_or_edit(update, "Сповіщення відключені 🔴", reply_markup=main_menu())
-
-async def send_test_notification(ctx: ContextTypes.DEFAULT_TYPE):
-    chat_id = ctx.job.data.get("chat_id")
-    try:
-        await ctx.bot.send_message(chat_id, "🔔 Тестове сповіщення: все працює ✅")
-    except Exception as e:
-        logging.warning("Failed to send test notification: %s", e)
-
-# --- Notification loop ---
-_notified_keys = set()
-_notified_day = None
-
-async def notify_loop(ctx: ContextTypes.DEFAULT_TYPE):
-    global _notified_day, _notified_keys
-    try:
-        now = datetime.now(KYIV_TZ)
-        today = datetime(now.year, now.month, now.day)
-        if _notified_day != today.date():
-            _notified_day = today.date()
-            _notified_keys = set()
-        subs = get_subscribers_set()
-        if not subs:
-            return
-        rows = get_records()
-        # Сьогоднішні пари з коректним часом початку
-        todays = [r for r in rows if (d:=normalize_date(r.get("date") or r.get("Дата"))) == today and parse_time_start(r)]
-        for r in todays:
-            hhmm_pair = parse_time_start(r)
-            if not hhmm_pair:
-                continue
-            hh, mm = hhmm_pair
-            start_dt = KYIV_TZ.localize(datetime(today.year, today.month, today.day, hh, mm))
-            delta = (start_dt - now).total_seconds()
-            # 0..600 сек до старту (10 хв)
-            if 0 <= delta <= 600:
-                key = (today.date().isoformat(), get_lesson(r,""), get_subject(r), hh, mm)
-                if key in _notified_keys:
-                    continue
-                _notified_keys.add(key)
-                msg = build_reminder_message(r, start_dt)
-                for chat_id in subs:
-                    try:
-                        await ctx.bot.send_message(chat_id, msg)
-                    except Exception as e:
-                        logging.warning("Notify fail to %s: %s", chat_id, e)
-    except Exception as e:
-        logging.exception("notify_loop error: %s", e)
-
-def build_reminder_message(rec, start_dt):
-    span = get_time_span(rec)
-    lesson = get_lesson(rec, "")
-    subj = get_subject(rec)
-    typ = get_type(rec)
-    teacher = get_teacher(rec)
-    left = lesson
-    if span: left = f"{lesson} ({span})" if lesson else f"({span})"
-    right_core = ", ".join([p for p in [f"{subj} ({typ})" if subj and typ else subj, teacher] if p])
-    tstr = start_dt.strftime("%H:%M")
-    return f"🔔 Нагадування: о {tstr} починається\n{left} — {right_core}"
-
-# --- Command wrappers for external entry ---
 async def cmd_today(update: Update, ctx: ContextTypes.DEFAULT_TYPE): await handle_today(update, ctx, 0)
 async def cmd_tomorrow(update: Update, ctx: ContextTypes.DEFAULT_TYPE): await handle_today(update, ctx, 1)
 async def cmd_week(update: Update, ctx: ContextTypes.DEFAULT_TYPE): await handle_week(update, ctx)
@@ -590,24 +389,26 @@ async def cmd_subject(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     body = fmt_grouped_next(res) if res else "Нічого не знайдено."
     await send_or_edit(update, f"Розклад по предмету: {name}\n\n{body}", reply_markup=main_menu())
 async def cmd_next(update: Update, ctx: ContextTypes.DEFAULT_TYPE): await handle_next(update, ctx)
+
 async def cmd_debug(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     try:
         rows = get_records()
         cols = list(rows[0].keys()) if rows else []
-        subs = list(get_subscribers_set())
+        subs = infer_subjects(rows)[:15]
         now = datetime.now(KYIV_TZ)
         today = datetime(now.year, now.month, now.day)
         today_rows = filter_rows(rows, target_date=today)
         text = (
-            f"Колонок: {len(cols)}\nНазви колонок: {cols}\n"
-            f"Рядків у таблиці: {len(rows)}\nСьогодні: {len(today_rows)} рядків\n"
-            f"Підписників: {len(subs)}"
+            f"Колонок: {len(cols)}\n"
+            f"Назви колонок: {cols}\n"
+            f"Рядків у таблиці: {len(rows)}\n"
+            f"Перші предмети (відсортовані): {subs}\n"
+            f"Сьогодні знайдено рядків: {len(today_rows)}"
         )
     except Exception as e:
         text = f"DEBUG ERROR: {e}\n{traceback.format_exc()}"
     await update.message.reply_text(text)
 
-# --- Error handler ---
 async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE):
     err = context.error
     logging.error("Global error: %s\n%s", err, traceback.format_exc())
@@ -617,14 +418,8 @@ async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE):
     except Exception:
         pass
 
-# --- Local entry (optional) ---
 def main():
-    app = (
-        ApplicationBuilder()
-        .token(BOT_TOKEN)
-        .connect_timeout(30).read_timeout(30).write_timeout(30).pool_timeout(30)
-        .build()
-    )
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("today", cmd_today))
     app.add_handler(CommandHandler("tomorrow", cmd_tomorrow))
@@ -633,31 +428,10 @@ def main():
     app.add_handler(CommandHandler("subject", cmd_subject))
     app.add_handler(CommandHandler("next", cmd_next))
     app.add_handler(CommandHandler("help", cmd_help))
-    app.add_handler(CommandHandler("notify_on", handle_notify_on))
-    app.add_handler(CommandHandler("notify_off", handle_notify_off))
+    app.add_handler(CommandHandler("debug", cmd_debug))
     app.add_handler(CallbackQueryHandler(on_cb))
     app.add_error_handler(on_error)
-    # Нагадування раз на хвилину
-    if getattr(app, "job_queue", None):
-        app.job_queue.run_repeating(notify_loop, interval=60, first=10)
-    # Старт: webhook якщо WEBHOOK_URL задано, інакше polling
-    webhook_url = os.getenv("WEBHOOK_URL")
-    listen_addr = os.getenv("LISTEN_ADDR", "0.0.0.0")
-    port = int(os.getenv("PORT", "8080"))
-    webhook_path = os.getenv("WEBHOOK_PATH", "/telegram")
-    if webhook_url:
-        url_path_clean = webhook_path[1:] if webhook_path.startswith("/") else webhook_path
-        app.run_webhook(
-            listen=listen_addr,
-            port=port,
-            url_path=url_path_clean,
-            webhook_url=webhook_url,
-            drop_pending_updates=True,
-            allowed_updates=None,
-        )
-    else:
-        app.run_polling(allowed_updates=None, drop_pending_updates=True)
+    app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
 
 if __name__ == "__main__":
     main()
-
