@@ -1,27 +1,39 @@
-﻿# bot_schedule_web.py (clean minimal)
-# Р РµС”СЃС‚СЂСѓС” С‚С–Р»СЊРєРё РїРѕС‚СЂС–Р±РЅС– РєРѕРјР°РЅРґРё (+ callback) РґР»СЏ РІРµР±С…СѓРєР°/РїРѕР»Р»С–РЅРіСѓ.
+# bot_schedule_web.py (robust import)
+# Імпортуємо модуль цілком і дістаємо хендлери через getattr,
+# щоб уникнути ImportError, якщо якась функція відсутня.
 
 import os
-from bot_schedule_custom_v6d import (
-    ApplicationBuilder, CommandHandler, CallbackQueryHandler,
-    on_cb, on_error, cmd_start, cmd_today, cmd_tomorrow, cmd_week,
-    cmd_subject, cmd_next, cmd_help, cmd_weeknext
-)
+import bot_schedule_custom_v6d as core
+from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler
+
+def _get(name, fallback=None):
+    return getattr(core, name, fallback)
 
 def main():
     token = os.environ["BOT_TOKEN"]
     app = ApplicationBuilder().token(token).build()
 
-    app.add_handler(CommandHandler("start", cmd_start))
-    app.add_handler(CommandHandler("today", cmd_today))
-    app.add_handler(CommandHandler("tomorrow", cmd_tomorrow))
-    app.add_handler(CommandHandler("week", cmd_week))
+    # Команди (усі через getattr)
+    app.add_handler(CommandHandler("start",   _get("cmd_start")))
+    app.add_handler(CommandHandler("today",   _get("cmd_today")))
+    app.add_handler(CommandHandler("tomorrow",_get("cmd_tomorrow")))
+    app.add_handler(CommandHandler("week",    _get("cmd_week")))
+
+    # /weeknext: якщо немає cmd_weeknext, загортаємо handle_week_next
+    cmd_weeknext = _get("cmd_weeknext")
+    if cmd_weeknext is None and _get("handle_week_next"):
+        async def _cmd_weeknext(update, ctx):
+            await core.handle_week_next(update, ctx)
+        cmd_weeknext = _cmd_weeknext
     app.add_handler(CommandHandler("weeknext", cmd_weeknext))
-    app.add_handler(CommandHandler("subject", cmd_subject))
-    app.add_handler(CommandHandler("next", cmd_next))
-    app.add_handler(CommandHandler("help", cmd_help))
-    app.add_handler(CallbackQueryHandler(on_cb))
-    app.add_error_handler(on_error)
+
+    app.add_handler(CommandHandler("subject", _get("cmd_subject")))
+    app.add_handler(CommandHandler("next",    _get("cmd_next")))
+    app.add_handler(CommandHandler("help",    _get("cmd_help")))
+
+    # Callback & errors
+    app.add_handler(CallbackQueryHandler(_get("on_cb")))
+    app.add_error_handler(_get("on_error"))
 
     webhook_url = os.getenv("WEBHOOK_URL")
     listen_addr = os.getenv("LISTEN_ADDR", "0.0.0.0")
