@@ -138,7 +138,7 @@ def main_menu():
         [InlineKeyboardButton("Розклад на сьогодні", callback_data="m:today"),
          InlineKeyboardButton("Розклад на завтра", callback_data="m:tomorrow")],
         [InlineKeyboardButton("Розклад на тиждень", callback_data="m:week"),
-         InlineKeyboardButton("Розклад на наступний тиждень", callback_data="m:week_next")],
+         InlineKeyboardButton("Наступний тиждень", callback_data="m:week_next")],
         [InlineKeyboardButton("Розклад по предмету", callback_data="m:subject")],
         [InlineKeyboardButton("Найближчі пари", callback_data="m:next")],
     ])
